@@ -4,16 +4,16 @@
 
 A high-performance video recording and sharing application inspired by Loom but optimized for speed and automated documentation.
 
-* **Key Innovation:** "Stream-to-Upload" architecture using chunked uploads.
-* **Unique Feature:** Auto-Documentation (OCR-based step extraction from video).
+- **Key Innovation:** "Stream-to-Upload" architecture using chunked uploads.
+- **Unique Feature:** Auto-Documentation (OCR-based step extraction from video).
 
 ## 2. Tech Stack
 
-* **Frontend:** Next.js (App Router), TypeScript, Tailwind CSS, MediaRecorder API.
-* **Backend:** FastAPI (Python 3.10+), `python-multipart`.
-* **Storage:** AWS S3 (Multipart Uploads).
-* **Database:** PostgreSQL (via SQLAlchemy).
-* **Real-time:** WebSockets for chunk ingestion.
+- **Frontend:** Next.js (App Router), TypeScript, Tailwind CSS, MediaRecorder API.
+- **Backend:** FastAPI (Python 3.10+), `python-multipart`.
+- **Storage:** AWS S3 (Multipart Uploads).
+- **Database:** PostgreSQL (via SQLAlchemy).
+- **Real-time:** WebSockets for chunk ingestion.
 
 ## 3. Architecture & Data Flow
 
@@ -28,8 +28,8 @@ A high-performance video recording and sharing application inspired by Loom but 
 
 A React overlay sitting on top of the `<video>` element.
 
-* **State:** Synchronized with `video.currentTime`.
-* **Persistence:** JSON metadata stored in PostgreSQL linked by `timestamp` (seconds).
+- **State:** Synchronized with `video.currentTime`.
+- **Persistence:** JSON metadata stored in PostgreSQL linked by `timestamp` (seconds).
 
 ## 4. Database Schema (PostgreSQL)
 
@@ -57,12 +57,15 @@ CREATE TABLE annotations (
 ## 5. Implementation Phases
 
 ### Phase 1: Infrastructure & API
+
 ### Phase 2: Frontend Recorder
+
 ### Phase 3: Interactive Player
+
 ### Phase 4: Auto-Doc Innovation (OCR)
 
 ## 6. Constraints
 
-* **No Buffering:** Do not load entire files into memory on the server.
-* **TypeScript:** Strict mode enabled.
-* **Security:** Use S3 Pre-signed URLs for playback.
+- **No Buffering:** Do not load entire files into memory on the server.
+- **TypeScript:** Strict mode enabled.
+- **Security:** Use S3 Pre-signed URLs for playback.
