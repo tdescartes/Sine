@@ -1,4 +1,11 @@
-"""Video REST API — start / chunk / complete / list / get endpoints."""
+"""
+Video REST API — start / chunk / complete / trim / list / get endpoints.
+
+v2 additions:
+  - codec stored on start
+  - trim_end auto-applied on complete ("Smart Stop")
+  - PATCH /video/{id}/trim for metadata-based instant trimming
+"""
 
 from __future__ import annotations
 
@@ -21,6 +28,7 @@ from app.s3 import (
 )
 from app.schemas import (
     ChunkUploadResponse,
+    TrimUpdateRequest,
     VideoCompleteRequest,
     VideoListResponse,
     VideoResponse,
@@ -32,6 +40,21 @@ router = APIRouter(prefix="/video", tags=["video"])
 
 # In-memory part tracking (production: use Redis or DB)
 _upload_parts: dict[str, list[dict]] = {}
+
+
+def _video_to_response(video: Video, playback_url: str | None = None) -> VideoResponse:
+    """Shared helper to build a VideoResponse from a Video model."""
+    return VideoResponse(
+        id=video.id,
+        title=video.title,
+        status=video.status,
+        duration=video.duration,
+        codec=video.codec,
+        trim_start=video.trim_start,
+        trim_end=video.trim_end,
+        created_at=video.created_at,
+        playback_url=playback_url,
+    )
 
 
 @router.post("/start", response_model=VideoStartResponse)
@@ -50,6 +73,7 @@ async def start_recording(
         s3_key=s3_key,
         status="recording",
         upload_id=s3_upload_id,
+        codec=body.codec,  # v2: store negotiated codec
     )
     db.add(video)
     await db.flush()
@@ -114,6 +138,11 @@ async def complete_recording(
 
     video.status = "processing"
     video.duration = body.duration
+
+    # v2: Smart Stop — apply trim_end if sent by the client
+    if body.trim_end is not None:
+        video.trim_end = body.trim_end
+
     await db.flush()
 
     # Clean up in-memory tracking
@@ -124,15 +153,47 @@ async def complete_recording(
     await db.flush()
 
     playback_url = get_presigned_url(video.s3_key)
+    return _video_to_response(video, playback_url)
 
-    return VideoResponse(
-        id=video.id,
-        title=video.title,
-        status=video.status,
-        duration=video.duration,
-        created_at=video.created_at,
-        playback_url=playback_url,
-    )
+
+@router.patch("/{video_id}/trim", response_model=VideoResponse)
+async def update_trim(
+    video_id: uuid.UUID,
+    body: TrimUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Update trim boundaries — metadata-based instant trimming.
+
+    No re-encoding. The player reads trim_start / trim_end and constrains
+    playback. Pass null to clear a boundary.
+    """
+    result = await db.execute(select(Video).where(Video.id == video_id))
+    video = result.scalar_one_or_none()
+    if video is None:
+        raise HTTPException(404, "Video not found")
+
+    if body.trim_start is not None:
+        if video.duration and body.trim_start > video.duration:
+            raise HTTPException(400, "trim_start exceeds video duration")
+        video.trim_start = body.trim_start
+    elif body.trim_start is None and "trim_start" in (body.model_fields_set or set()):
+        video.trim_start = None
+
+    if body.trim_end is not None:
+        if video.duration and body.trim_end > video.duration:
+            raise HTTPException(400, "trim_end exceeds video duration")
+        video.trim_end = body.trim_end
+    elif body.trim_end is None and "trim_end" in (body.model_fields_set or set()):
+        video.trim_end = None
+
+    await db.flush()
+
+    playback_url = None
+    if video.status == "ready" and video.s3_key:
+        playback_url = get_presigned_url(video.s3_key)
+
+    return _video_to_response(video, playback_url)
 
 
 @router.post("/abort/{video_id}")
@@ -173,14 +234,7 @@ async def get_video(
     if video.status == "ready" and video.s3_key:
         playback_url = get_presigned_url(video.s3_key)
 
-    return VideoResponse(
-        id=video.id,
-        title=video.title,
-        status=video.status,
-        duration=video.duration,
-        created_at=video.created_at,
-        playback_url=playback_url,
-    )
+    return _video_to_response(video, playback_url)
 
 
 @router.get("/", response_model=VideoListResponse)
@@ -203,15 +257,6 @@ async def list_videos(
         playback_url = None
         if v.status == "ready" and v.s3_key:
             playback_url = get_presigned_url(v.s3_key)
-        items.append(
-            VideoResponse(
-                id=v.id,
-                title=v.title,
-                status=v.status,
-                duration=v.duration,
-                created_at=v.created_at,
-                playback_url=playback_url,
-            )
-        )
+        items.append(_video_to_response(v, playback_url))
 
     return VideoListResponse(videos=items, total=total)
