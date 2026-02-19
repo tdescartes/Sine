@@ -1,11 +1,17 @@
-"""WebSocket endpoint for real-time chunk ingestion.
+"""
+WebSocket endpoint for real-time chunk ingestion — Sine v2.
 
 Protocol (binary frames with JSON control messages):
   1. Client connects to  ws://.../ws/upload/{video_id}
   2. Client sends binary frames (video chunks)
   3. Server streams each frame directly to S3 (upload_part)
   4. Client sends JSON  {"action": "complete", "duration": 42.5}  to finalise
-  5. Server responds with  {"status": "ready", "playback_url": "..."}
+  5. Client sends JSON  {"action": "marker", ...}  to record a scene marker
+  6. Server responds with  {"status": "ready", "playback_url": "..."}
+
+v2 additions:
+  - "marker" action → stores SceneMarker during recording
+  - "complete" accepts optional trim_end for Smart Stop
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
-from app.models import Video
+from app.models import SceneMarker, Video
 from app.s3 import complete_upload, get_presigned_url, upload_chunk
 
 router = APIRouter()
@@ -44,6 +50,7 @@ async def ws_upload(websocket: WebSocket, video_id: uuid.UUID):
 
     part_number = 1
     parts: list[dict[str, Any]] = []
+    marker_order = 0
 
     try:
         while True:
@@ -70,7 +77,30 @@ async def ws_upload(websocket: WebSocket, video_id: uuid.UUID):
 
                 action = payload.get("action")
 
-                if action == "complete":
+                # ── Scene Marker (v2) ──────────────────────────────────
+                if action == "marker":
+                    timestamp = payload.get("timestamp", 0)
+                    label = payload.get("label", "Scene change")
+                    source = payload.get("source", "focus_switch")
+
+                    async with async_session() as db:
+                        marker = SceneMarker(
+                            video_id=video_id,
+                            timestamp=timestamp,
+                            label=label,
+                            source=source,
+                            order=marker_order,
+                        )
+                        db.add(marker)
+                        await db.commit()
+                        marker_order += 1
+
+                    await websocket.send_json(
+                        {"event": "marker_ack", "timestamp": timestamp, "label": label}
+                    )
+
+                # ── Complete Recording ─────────────────────────────────
+                elif action == "complete":
                     if not parts:
                         await websocket.send_json({"error": "No chunks uploaded"})
                         continue
@@ -78,6 +108,7 @@ async def ws_upload(websocket: WebSocket, video_id: uuid.UUID):
                     complete_upload(s3_key, upload_id, parts)
 
                     duration = payload.get("duration")
+                    trim_end = payload.get("trim_end")  # v2: Smart Stop
 
                     async with async_session() as db:
                         result = await db.execute(
@@ -87,6 +118,8 @@ async def ws_upload(websocket: WebSocket, video_id: uuid.UUID):
                         if video:
                             video.status = "ready"
                             video.duration = duration
+                            if trim_end is not None:
+                                video.trim_end = trim_end
                             await db.commit()
 
                     playback_url = get_presigned_url(s3_key)
