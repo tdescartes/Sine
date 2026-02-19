@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.database import engine
 from app.models import Base
-from app.routers import annotations, ocr, video, ws
+from app.routers import annotations, markers, video, ws
 
 
 @asynccontextmanager
@@ -23,8 +23,8 @@ settings = get_settings()
 
 app = FastAPI(
     title="Sine — VideoFlow API",
-    description="High-performance video recording and sharing with stream-to-upload architecture.",
-    version="0.1.0",
+    description="Intelligent video capture with QUIC-ready transport, AV1 encoding, metadata trimming, and context-aware scene markers.",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -40,7 +40,7 @@ app.add_middleware(
 # REST routers
 app.include_router(video.router)
 app.include_router(annotations.router)
-app.include_router(ocr.router)
+app.include_router(markers.router)
 
 # WebSocket router
 app.include_router(ws.router)
