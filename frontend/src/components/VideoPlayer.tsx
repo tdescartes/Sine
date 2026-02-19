@@ -1,21 +1,26 @@
 /**
- * VideoPlayer — custom player with interactive annotation overlay.
+ * VideoPlayer — custom player with interactive annotation overlay (v2).
  *
  * Features:
  *  - Custom controls (play/pause, seek, volume, fullscreen)
+ *  - Metadata-based trim bounds (trim_start / trim_end) — no re-encoding
  *  - Timeline "bubbles" that mark annotation timestamps
- *  - Click a bubble to jump to that moment
+ *  - Diamond-shaped scene markers on the timeline
+ *  - Click a bubble/marker to jump to that moment
  *  - Add comments at the current timestamp
  */
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatTime, cn } from "@/lib/utils";
-import type { AnnotationResponse } from "@/lib/api";
+import type { AnnotationResponse, SceneMarkerResponse } from "@/lib/api";
 
 interface VideoPlayerProps {
     src: string;
     annotations: AnnotationResponse[];
+    sceneMarkers?: SceneMarkerResponse[];
+    trimStart?: number | null;
+    trimEnd?: number | null;
     onAddAnnotation?: (timestamp: number, content: string) => void;
     onDeleteAnnotation?: (id: number) => void;
 }
@@ -23,6 +28,9 @@ interface VideoPlayerProps {
 export default function VideoPlayer({
     src,
     annotations,
+    sceneMarkers = [],
+    trimStart,
+    trimEnd,
     onAddAnnotation,
     onDeleteAnnotation,
 }: VideoPlayerProps) {
@@ -31,13 +39,21 @@ export default function VideoPlayer({
 
     const [isPlaying, setIsPlaying] = useState(false);
     const [currentTime, setCurrentTime] = useState(0);
-    const [duration, setDuration] = useState(0);
+    const [rawDuration, setRawDuration] = useState(0);
     const [volume, setVolume] = useState(1);
     const [isMuted, setIsMuted] = useState(false);
     const [showComment, setShowComment] = useState(false);
     const [commentText, setCommentText] = useState("");
     const [activeAnnotation, setActiveAnnotation] =
         useState<AnnotationResponse | null>(null);
+    const [hoveredMarker, setHoveredMarker] = useState<SceneMarkerResponse | null>(null);
+
+    // ─── Trim-aware derived values ────────────────────────────────────────
+
+    const effectiveTrimStart = trimStart ?? 0;
+    const effectiveTrimEnd = trimEnd ?? rawDuration;
+    const effectiveDuration = Math.max(0, effectiveTrimEnd - effectiveTrimStart);
+    const displayTime = Math.max(0, currentTime - effectiveTrimStart);
 
     // ─── Video event handlers ─────────────────────────────────────────────
 
@@ -45,17 +61,34 @@ export default function VideoPlayer({
         const video = videoRef.current;
         if (!video) return;
 
-        const onTimeUpdate = () => setCurrentTime(video.currentTime);
-        const onDurationChange = () => setDuration(video.duration);
+        const onTimeUpdate = () => {
+            const t = video.currentTime;
+            setCurrentTime(t);
+
+            // Enforce trim bounds: pause at trim_end
+            if (effectiveTrimEnd > 0 && t >= effectiveTrimEnd) {
+                video.pause();
+                video.currentTime = effectiveTrimEnd;
+            }
+        };
+        const onDurationChange = () => setRawDuration(video.duration);
         const onPlay = () => setIsPlaying(true);
         const onPause = () => setIsPlaying(false);
         const onEnded = () => setIsPlaying(false);
+
+        // On load, seek to trim_start
+        const onLoadedData = () => {
+            if (effectiveTrimStart > 0) {
+                video.currentTime = effectiveTrimStart;
+            }
+        };
 
         video.addEventListener("timeupdate", onTimeUpdate);
         video.addEventListener("durationchange", onDurationChange);
         video.addEventListener("play", onPlay);
         video.addEventListener("pause", onPause);
         video.addEventListener("ended", onEnded);
+        video.addEventListener("loadeddata", onLoadedData);
 
         return () => {
             video.removeEventListener("timeupdate", onTimeUpdate);
@@ -63,8 +96,9 @@ export default function VideoPlayer({
             video.removeEventListener("play", onPlay);
             video.removeEventListener("pause", onPause);
             video.removeEventListener("ended", onEnded);
+            video.removeEventListener("loadeddata", onLoadedData);
         };
-    }, []);
+    }, [effectiveTrimStart, effectiveTrimEnd]);
 
     // ─── Check annotation proximity ──────────────────────────────────────
 
@@ -81,11 +115,15 @@ export default function VideoPlayer({
         const video = videoRef.current;
         if (!video) return;
         if (video.paused) {
+            // If at trim_end, restart from trim_start
+            if (effectiveTrimEnd > 0 && video.currentTime >= effectiveTrimEnd) {
+                video.currentTime = effectiveTrimStart;
+            }
             video.play();
         } else {
             video.pause();
         }
-    }, []);
+    }, [effectiveTrimStart, effectiveTrimEnd]);
 
     const seek = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
         const video = videoRef.current;
@@ -94,8 +132,9 @@ export default function VideoPlayer({
 
         const rect = bar.getBoundingClientRect();
         const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-        video.currentTime = ratio * video.duration;
-    }, []);
+        // Map ratio to the trimmed range
+        video.currentTime = effectiveTrimStart + ratio * effectiveDuration;
+    }, [effectiveTrimStart, effectiveDuration]);
 
     const toggleMute = useCallback(() => {
         const video = videoRef.current;
@@ -129,7 +168,15 @@ export default function VideoPlayer({
         setShowComment(false);
     }, [commentText, currentTime, onAddAnnotation]);
 
-    const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
+    const progress = effectiveDuration > 0 ? (displayTime / effectiveDuration) * 100 : 0;
+
+    // ─── Source icons for scene markers ───────────────────────────────────
+
+    const markerSourceColors: Record<string, string> = {
+        focus_switch: "bg-cyan-400",
+        visibility: "bg-purple-400",
+        manual: "bg-emerald-400",
+    };
 
     return (
         <div className="w-full max-w-4xl mx-auto">
@@ -150,18 +197,36 @@ export default function VideoPlayer({
                             <span
                                 className={cn(
                                     "text-xs font-medium px-2 py-0.5 rounded-full",
-                                    activeAnnotation.type === "ocr_step"
-                                        ? "bg-blue-500/30 text-blue-300"
-                                        : "bg-yellow-500/30 text-yellow-300"
+                                    "bg-yellow-500/30 text-yellow-300"
                                 )}
                             >
-                                {activeAnnotation.type === "ocr_step" ? "Auto-Doc" : "Comment"}
+                                Comment
                             </span>
                             <span className="text-xs text-gray-400">
                                 {formatTime(activeAnnotation.timestamp)}
                             </span>
                         </div>
                         <p className="text-sm">{activeAnnotation.content}</p>
+                    </div>
+                )}
+
+                {/* Hovered scene marker tooltip */}
+                {hoveredMarker && (
+                    <div className="absolute top-4 left-4 max-w-xs bg-black/80 backdrop-blur-sm text-white rounded-xl p-3 animate-in fade-in">
+                        <div className="flex items-center gap-2 mb-1">
+                            <span
+                                className={cn(
+                                    "text-xs font-medium px-2 py-0.5 rounded-full",
+                                    "bg-cyan-500/30 text-cyan-300"
+                                )}
+                            >
+                                Scene
+                            </span>
+                            <span className="text-xs text-gray-400">
+                                {formatTime(hoveredMarker.timestamp)}
+                            </span>
+                        </div>
+                        <p className="text-sm">{hoveredMarker.label}</p>
                     </div>
                 )}
 
@@ -185,7 +250,7 @@ export default function VideoPlayer({
 
                 {/* Bottom controls — shown on hover */}
                 <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-4 opacity-0 group-hover:opacity-100 transition-opacity">
-                    {/* Progress bar with annotation bubbles */}
+                    {/* Progress bar with annotation bubbles + scene markers */}
                     <div
                         ref={progressRef}
                         className="relative h-1.5 bg-white/20 rounded-full cursor-pointer mb-3 group/progress"
@@ -197,15 +262,43 @@ export default function VideoPlayer({
                             style={{ width: `${progress}%` }}
                         />
 
-                        {/* Annotation markers */}
+                        {/* Scene markers — diamond shape */}
+                        {sceneMarkers.map((m) => {
+                            const pos = effectiveDuration > 0
+                                ? ((m.timestamp - effectiveTrimStart) / effectiveDuration) * 100
+                                : 0;
+                            if (pos < 0 || pos > 100) return null;
+                            return (
+                                <button
+                                    key={`marker-${m.id}`}
+                                    className={cn(
+                                        "absolute top-1/2 -translate-y-1/2 w-3 h-3 rotate-45 border-2 border-white transition-transform hover:scale-150 z-20",
+                                        markerSourceColors[m.source] || "bg-cyan-400"
+                                    )}
+                                    style={{ left: `${pos}%` }}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        jumpTo(m.timestamp);
+                                    }}
+                                    onMouseEnter={() => setHoveredMarker(m)}
+                                    onMouseLeave={() => setHoveredMarker(null)}
+                                    title={m.label}
+                                />
+                            );
+                        })}
+
+                        {/* Annotation markers — circle shape */}
                         {annotations.map((a) => {
-                            const pos = duration > 0 ? (a.timestamp / duration) * 100 : 0;
+                            const pos = effectiveDuration > 0
+                                ? ((a.timestamp - effectiveTrimStart) / effectiveDuration) * 100
+                                : 0;
+                            if (pos < 0 || pos > 100) return null;
                             return (
                                 <button
                                     key={a.id}
                                     className={cn(
                                         "absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full border-2 border-white transition-transform hover:scale-150 z-10",
-                                        a.type === "ocr_step" ? "bg-blue-400" : "bg-yellow-400"
+                                        "bg-yellow-400"
                                     )}
                                     style={{ left: `${pos}%` }}
                                     onClick={(e) => {
@@ -262,13 +355,27 @@ export default function VideoPlayer({
                                 className="w-20 h-1 accent-sine-500"
                             />
 
-                            {/* Time display */}
+                            {/* Time display — shows trimmed time */}
                             <span className="font-mono text-xs">
-                                {formatTime(currentTime)} / {formatTime(duration)}
+                                {formatTime(displayTime)} / {formatTime(effectiveDuration)}
                             </span>
+
+                            {/* Trim indicator */}
+                            {(trimStart != null || trimEnd != null) && (
+                                <span className="text-xs bg-sine-500/30 text-sine-300 px-2 py-0.5 rounded-full">
+                                    Trimmed
+                                </span>
+                            )}
                         </div>
 
                         <div className="flex items-center gap-2">
+                            {/* Scene markers count */}
+                            {sceneMarkers.length > 0 && (
+                                <span className="text-xs text-cyan-300 opacity-75">
+                                    {sceneMarkers.length} scene{sceneMarkers.length !== 1 ? "s" : ""}
+                                </span>
+                            )}
+
                             {/* Add comment button */}
                             {onAddAnnotation && (
                                 <button
@@ -324,6 +431,38 @@ export default function VideoPlayer({
                 </div>
             )}
 
+            {/* Scene Markers chapter list */}
+            {sceneMarkers.length > 0 && (
+                <div className="mt-6">
+                    <h3 className="text-lg font-semibold text-gray-800 mb-3">
+                        Scenes ({sceneMarkers.length})
+                    </h3>
+                    <div className="flex flex-wrap gap-2">
+                        {sceneMarkers.map((m, i) => (
+                            <button
+                                key={m.id}
+                                onClick={() => jumpTo(m.timestamp)}
+                                className={cn(
+                                    "flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition",
+                                    "bg-gray-50 border border-gray-200 hover:bg-sine-50 hover:border-sine-300"
+                                )}
+                            >
+                                <span
+                                    className={cn(
+                                        "w-2.5 h-2.5 rotate-45 rounded-sm",
+                                        markerSourceColors[m.source] || "bg-cyan-400"
+                                    )}
+                                />
+                                <span className="font-mono text-xs text-gray-500">
+                                    {formatTime(m.timestamp)}
+                                </span>
+                                <span className="text-gray-700">{m.label}</span>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
+
             {/* Annotations sidebar */}
             {annotations.length > 0 && (
                 <div className="mt-6">
@@ -347,12 +486,10 @@ export default function VideoPlayer({
                                     <span
                                         className={cn(
                                             "text-xs font-medium px-1.5 py-0.5 rounded",
-                                            a.type === "ocr_step"
-                                                ? "bg-blue-100 text-blue-700"
-                                                : "bg-yellow-100 text-yellow-700"
+                                            "bg-yellow-100 text-yellow-700"
                                         )}
                                     >
-                                        {a.type === "ocr_step" ? "Auto-Doc" : "Comment"}
+                                        Comment
                                     </span>
                                     <p className="text-sm text-gray-700 mt-1 line-clamp-2">
                                         {a.content}
