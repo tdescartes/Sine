@@ -1,5 +1,5 @@
 /**
- * Watch page — video player with interactive annotations.
+ * Watch page — video player with interactive annotations and scene markers (v2).
  */
 "use client";
 
@@ -9,11 +9,12 @@ import VideoPlayer from "@/components/VideoPlayer";
 import {
     getVideo,
     listAnnotations,
+    listMarkers,
     createAnnotation,
     deleteAnnotation,
-    triggerOcr,
     type VideoResponse,
     type AnnotationResponse,
+    type SceneMarkerResponse,
 } from "@/lib/api";
 import { formatTime, formatDate } from "@/lib/utils";
 
@@ -24,21 +25,23 @@ export default function WatchPage() {
 
     const [video, setVideo] = useState<VideoResponse | null>(null);
     const [annotations, setAnnotations] = useState<AnnotationResponse[]>([]);
+    const [sceneMarkers, setSceneMarkers] = useState<SceneMarkerResponse[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [ocrProcessing, setOcrProcessing] = useState(false);
 
     // ─── Load data ────────────────────────────────────────────────────────
 
     const loadData = useCallback(async () => {
         try {
             setLoading(true);
-            const [videoData, annotationsData] = await Promise.all([
+            const [videoData, annotationsData, markersData] = await Promise.all([
                 getVideo(videoId),
                 listAnnotations(videoId),
+                listMarkers(videoId),
             ]);
             setVideo(videoData);
             setAnnotations(annotationsData);
+            setSceneMarkers(markersData);
         } catch (err) {
             setError("Failed to load video");
         } finally {
@@ -80,20 +83,6 @@ export default function WatchPage() {
         }
     }, []);
 
-    const handleTriggerOcr = useCallback(async () => {
-        try {
-            setOcrProcessing(true);
-            await triggerOcr(videoId);
-            // Poll for results after a delay
-            setTimeout(async () => {
-                const updatedAnnotations = await listAnnotations(videoId);
-                setAnnotations(updatedAnnotations);
-                setOcrProcessing(false);
-            }, 5000);
-        } catch {
-            setOcrProcessing(false);
-        }
-    }, [videoId]);
 
     // ─── Render ───────────────────────────────────────────────────────────
 
@@ -137,25 +126,12 @@ export default function WatchPage() {
                     </button>
 
                     <div className="flex items-center gap-3">
-                        <button
-                            onClick={handleTriggerOcr}
-                            disabled={ocrProcessing || video.status !== "ready"}
-                            className="px-4 py-2 bg-blue-500 hover:bg-blue-600 disabled:bg-blue-300 text-white rounded-lg text-sm font-medium transition flex items-center gap-2"
-                        >
-                            {ocrProcessing ? (
-                                <>
-                                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                                    Processing...
-                                </>
-                            ) : (
-                                <>
-                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                    </svg>
-                                    Auto-Document (OCR)
-                                </>
-                            )}
-                        </button>
+                        {/* v2: codec badge */}
+                        {video.codec && (
+                            <span className="text-xs bg-sine-100 text-sine-700 px-2 py-0.5 rounded-full font-medium uppercase">
+                                {video.codec}
+                            </span>
+                        )}
                     </div>
                 </div>
             </header>
@@ -173,6 +149,16 @@ export default function WatchPage() {
                         <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs font-medium">
                             {video.status}
                         </span>
+                        {(video.trim_start != null || video.trim_end != null) && (
+                            <span className="px-2 py-0.5 bg-sine-100 text-sine-700 rounded-full text-xs font-medium">
+                                Trimmed
+                            </span>
+                        )}
+                        {sceneMarkers.length > 0 && (
+                            <span className="px-2 py-0.5 bg-cyan-100 text-cyan-700 rounded-full text-xs font-medium">
+                                {sceneMarkers.length} scene{sceneMarkers.length !== 1 ? "s" : ""}
+                            </span>
+                        )}
                     </div>
                 </div>
 
@@ -181,6 +167,9 @@ export default function WatchPage() {
                     <VideoPlayer
                         src={video.playback_url}
                         annotations={annotations}
+                        sceneMarkers={sceneMarkers}
+                        trimStart={video.trim_start}
+                        trimEnd={video.trim_end}
                         onAddAnnotation={handleAddAnnotation}
                         onDeleteAnnotation={handleDeleteAnnotation}
                     />
