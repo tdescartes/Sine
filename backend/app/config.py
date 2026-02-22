@@ -12,7 +12,8 @@ class Settings(BaseSettings):
     s3_bucket_name: str = "sine-videos"
 
     # Database
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/sine"
+    mongodb_url: str = "mongodb://localhost:27017"
+    mongodb_db_name: str = "sine"
 
     # Server
     host: str = "0.0.0.0"
