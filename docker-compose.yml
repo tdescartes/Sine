@@ -1,18 +1,14 @@
-version: "3.9"
-
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: sine-postgres
+  mongodb:
+    image: mongo:7
+    container_name: sine-mongodb
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "27017:27017"
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: sine
+      MONGO_INITDB_DATABASE: sine
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - mongodata:/data/db
 
   # Optional: LocalStack for local S3 emulation
   localstack:
@@ -30,5 +26,5 @@ services:
       - localstack-data:/var/lib/localstack
 
 volumes:
-  pgdata:
+  mongodata:
   localstack-data:
