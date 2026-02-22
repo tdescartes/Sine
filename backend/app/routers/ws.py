@@ -18,17 +18,119 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.database import async_session
-from app.models import SceneMarker, Video
+from app.database import get_database
+from app.models import SCENE_MARKERS_COLLECTION, VIDEOS_COLLECTION
 from app.s3 import complete_upload, get_presigned_url, upload_chunk
 
 router = APIRouter()
+
+
+@router.websocket("/ws/upload/{video_id}")
+async def ws_upload(websocket: WebSocket, video_id: uuid.UUID):
+    """Accept streaming binary chunks over WebSocket and push to S3."""
+    await websocket.accept()
+
+    db = get_database()
+
+    doc = await db[VIDEOS_COLLECTION].find_one({"_id": str(video_id)})
+    if doc is None or doc["status"] != "recording":
+        await websocket.close(code=4000, reason="Invalid video or state")
+        return
+
+    s3_key = doc["s3_key"]
+    upload_id = doc["upload_id"]
+
+    part_number = 1
+    parts: list[dict[str, Any]] = []
+    marker_order = 0
+
+    try:
+        while True:
+            message = await websocket.receive()
+
+            # Binary frame → upload chunk to S3
+            if "bytes" in message and message["bytes"]:
+                data = message["bytes"]
+                part = upload_chunk(s3_key, upload_id, part_number, data)
+                parts.append(part)
+
+                await websocket.send_json(
+                    {"event": "chunk_ack", "part_number": part_number}
+                )
+                part_number += 1
+
+            # Text frame → control message
+            elif "text" in message and message["text"]:
+                try:
+                    payload = json.loads(message["text"])
+                except json.JSONDecodeError:
+                    await websocket.send_json({"error": "Invalid JSON"})
+                    continue
+
+                action = payload.get("action")
+
+                # ── Scene Marker (v2) ───────────────────────────
+                if action == "marker":
+                    timestamp = payload.get("timestamp", 0)
+                    label = payload.get("label", "Scene change")
+                    source = payload.get("source", "focus_switch")
+
+                    await db[SCENE_MARKERS_COLLECTION].insert_one({
+                        "video_id": str(video_id),
+                        "timestamp": timestamp,
+                        "label": label,
+                        "source": source,
+                        "order": marker_order,
+                        "created_at": datetime.now(timezone.utc),
+                    })
+                    marker_order += 1
+
+                    await websocket.send_json(
+                        {"event": "marker_ack", "timestamp": timestamp, "label": label}
+                    )
+
+                # ── Complete Recording ──────────────────────────
+                elif action == "complete":
+                    if not parts:
+                        await websocket.send_json({"error": "No chunks uploaded"})
+                        continue
+
+                    complete_upload(s3_key, upload_id, parts)
+
+                    duration = payload.get("duration")
+                    trim_end = payload.get("trim_end")  # v2: Smart Stop
+
+                    update: dict = {"status": "ready", "duration": duration}
+                    if trim_end is not None:
+                        update["trim_end"] = trim_end
+
+                    await db[VIDEOS_COLLECTION].update_one(
+                        {"_id": str(video_id)}, {"$set": update}
+                    )
+
+                    playback_url = get_presigned_url(s3_key)
+                    await websocket.send_json(
+                        {
+                            "event": "complete",
+                            "status": "ready",
+                            "playback_url": playback_url,
+                        }
+                    )
+                    await websocket.close()
+                    return
+
+                elif action == "ping":
+                    await websocket.send_json({"event": "pong"})
+
+    except WebSocketDisconnect:
+        # Client disconnected — parts remain in S3 for potential resume
+        pass
+
 
 
 @router.websocket("/ws/upload/{video_id}")
