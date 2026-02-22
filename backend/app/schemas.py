@@ -72,7 +72,7 @@ class AnnotationCreate(BaseModel):
 
 
 class AnnotationResponse(BaseModel):
-    id: int
+    id: str
     video_id: uuid.UUID
     timestamp: float
     content: Optional[str]
@@ -99,7 +99,7 @@ class SceneMarkerBatchCreate(BaseModel):
 
 
 class SceneMarkerResponse(BaseModel):
-    id: int
+    id: str
     video_id: uuid.UUID
     timestamp: float
     label: str
